@@ -69,7 +69,7 @@ def get_object_rectangles(path_to_img: str, paper_contours: Optional[np.ndarray]
 
     contours = find_all_contours(image)
 
-    objects = find_all_objects(contours)
+    objects = list(contours[0])
     cv2.drawContours(image, objects, -1, (0, 255, 0), thickness=4)
 
     rectangles = find_rectangles_for_objects(objects, h, w)
@@ -92,15 +92,6 @@ def find_all_contours(image: np.ndarray):
     return cv2.findContours(edge, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
 
 
-def find_all_objects(contours: list):
-    objects = list()
-
-    for contour in contours[0]:
-        objects.append(contour)
-
-    return objects
-
-
 def find_rectangles_for_objects(objects: list, h, w):
     rectangles = list()
     for obj in objects:
@@ -115,13 +106,8 @@ def find_rectangles_for_objects(objects: list, h, w):
 def is_rectangle_valid(rectangle, h, w):
     delta = 50
 
-    rect_size = len(rectangle)
-    counter = 0
-    for elem in rectangle:
-        if elem[0] < delta or elem[1] < delta or elem[0] >= w - delta or elem[1] >= h - delta:
-            counter += 1
-
-    if rect_size == counter:
+    cond = lambda elem: elem[0] < delta or elem[1] < delta or elem[0] >= w - delta or elem[1] >= h - delta
+    if sum(cond(elem) for elem in rectangle) == len(rectangle):
         return False
 
     min_allowable_area = 550
@@ -133,14 +119,12 @@ def is_rectangle_valid(rectangle, h, w):
 def check_image(path_to_image: str):
     polygon_contours, paper_contours = find_paper_and_polygon_contours(path_to_image)
     object_rectangles = get_object_rectangles(path, paper_contours)
-    sum = 0
-    for obj in object_rectangles:
-        sum += cv2.contourArea(obj)
+    sum_areas = sum(cv2.contourArea(obj) for obj in object_rectangles)
 
-    return cv2.contourArea(polygon_contours) >= sum
+    return cv2.contourArea(polygon_contours) >= sum_areas
 
 
 if __name__ == '__main__':
-    path = "/data/input/yes/test7.jpg"
+    path = "D:/study/Intelligent-Placer/data/yes/test7.jpg"
     result = check_image(path)
     print(result)
