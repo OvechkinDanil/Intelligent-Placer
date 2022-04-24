@@ -4,6 +4,22 @@ from skimage.morphology import binary_closing
 from scipy.ndimage import binary_fill_holes
 from skimage.feature import canny
 import cv2
+import skimage
+import matplotlib.pyplot as plt
+from scipy.ndimage import rotate
+
+
+def create_mask_from_contours(contours: np.ndarray) -> np.ndarray:
+    bounding_rect = cv2.boundingRect(contours)
+    y_down, x_left, height, width = bounding_rect[0], bounding_rect[1], bounding_rect[2], bounding_rect[3]
+    mask = np.full((width, height), True)
+
+    for y in range(y_down, y_down + height):
+        for x in range(x_left, x_left + width):
+            if cv2.pointPolygonTest(contours, (y, x), False) >= 0:
+                mask[x - x_left][y - y_down] = False
+
+    return mask
 
 
 def find_paper_and_polygon_contours(path_to_img: str) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
@@ -61,7 +77,7 @@ def _find_contours(img: np.ndarray):
     return contours
 
 
-def get_object_rectangles(path_to_img: str, paper_contours: Optional[np.ndarray]):
+def get_objects_masks_with_areas(path_to_img: str, paper_contours: Optional[np.ndarray]):
     min_paper_y = min(paper_contours, key=lambda coordinates: coordinates[0][1])[0][1]
 
     image = cv2.imread(path_to_img)[:min_paper_y, :]
@@ -70,18 +86,19 @@ def get_object_rectangles(path_to_img: str, paper_contours: Optional[np.ndarray]
     contours = find_all_contours(image)
 
     objects = list(contours[0])
-    cv2.drawContours(image, objects, -1, (0, 255, 0), thickness=4)
 
-    rectangles = find_rectangles_for_objects(objects, h, w)
+    object_masks_with_areas = []
+    for obj in objects:
+        rect = cv2.minAreaRect(obj)
+        rectangle = np.int0(cv2.boxPoints(rect))
+        if is_rectangle_valid(rectangle, h, w):
+            mask = create_mask_from_contours(obj)
+            mask = ~mask
+            label = skimage.measure.label(mask)
+            prop = skimage.measure.regionprops(label)[0]
+            object_masks_with_areas.append((mask, prop.area))
 
-    cv2.drawContours(image, rectangles, -1, (0, 0, 255), 4)
-
-    cv2.imshow('Binary image', image)
-    cv2.waitKey(0)
-    cv2.imwrite('../src/image_thres1.jpg', image)
-    cv2.destroyAllWindows()
-
-    return rectangles
+    return object_masks_with_areas
 
 
 def find_all_contours(image: np.ndarray):
@@ -93,14 +110,16 @@ def find_all_contours(image: np.ndarray):
 
 
 def find_rectangles_for_objects(objects: list, h, w):
-    rectangles = list()
+    object_masks_with_area = list()
     for obj in objects:
         rect = cv2.minAreaRect(obj)
         rectangle = np.int0(cv2.boxPoints(rect))
         if is_rectangle_valid(rectangle, h, w):
-            rectangles.append(rectangle)
+            mask = create_mask_from_contours(obj)
+            mask = ~mask
+            object_masks_with_area.append((mask, cv2.contourArea(obj)))
 
-    return rectangles
+    return object_masks_with_area
 
 
 def is_rectangle_valid(rectangle, h, w):
@@ -110,21 +129,61 @@ def is_rectangle_valid(rectangle, h, w):
     if sum(cond(elem) for elem in rectangle) == len(rectangle):
         return False
 
-    min_allowable_area = 550
+    min_allowable_area = 1000
     max_allowable_area = (h - delta) * (w - delta)
 
     return max_allowable_area > cv2.contourArea(rectangle) > min_allowable_area
 
 
+def try_to_fit_object(extended_polygon_mask, object_mask, pos_x, pos_y):
+    object_mask_height, object_mask_width = object_mask.shape
+    delta = 25
+    step_angle = 20
+    max_angle = 360
+
+    extended_polygon_mask_height, extended_polygon_mask_width = extended_polygon_mask.shape
+
+    for y in range(pos_y, extended_polygon_mask_height - object_mask_height, delta):
+        for x in range(pos_x, extended_polygon_mask_width - object_mask_width, delta):
+
+            for angle in range(0, max_angle, step_angle):
+
+                rotated_object_mask = rotate(object_mask, angle, reshape=True)
+                rotated_object_mask_height, rotated_object_mask_width = rotated_object_mask.shape
+                polygon_mask_cut = extended_polygon_mask[y:y + rotated_object_mask_height, x:x +
+                                                                                             rotated_object_mask_width]
+
+                try:
+                    overlay_areas = cv2.bitwise_and(polygon_mask_cut.astype(int), rotated_object_mask.astype(int))
+                except:
+                    continue
+
+                if np.sum(overlay_areas) == 0:
+                    extended_polygon_mask[y:y + rotated_object_mask_height, x:x + rotated_object_mask_width] = \
+                        cv2.bitwise_xor(polygon_mask_cut.astype(int), rotated_object_mask.astype(int)).astype(bool)
+
+                    plt.imshow(extended_polygon_mask)
+                    plt.show()
+                    return True
+
+    return False
+
+
 def check_image(path_to_image: str):
     polygon_contours, paper_contours = find_paper_and_polygon_contours(path_to_image)
-    object_rectangles = get_object_rectangles(path, paper_contours)
-    sum_areas = sum(cv2.contourArea(obj) for obj in object_rectangles)
+    object_masks_with_areas = get_objects_masks_with_areas(path_to_image, paper_contours)
+    polygon_mask = create_mask_from_contours(polygon_contours)
 
-    return cv2.contourArea(polygon_contours) >= sum_areas
+    sorted_object_masks_with_areas = sorted(object_masks_with_areas, key=lambda tup: tup[1], reverse=True)
 
+    extended_polygon_mask = np.ones(np.asarray(polygon_mask.shape) * 2)
+    polygon_mask_h, polygon_mask_w = polygon_mask.shape
+    start_pos_y, start_pos_x = np.asarray(extended_polygon_mask.shape) // 2 - np.asarray(polygon_mask.shape) // 2
+    extended_polygon_mask[start_pos_y:start_pos_y + polygon_mask_h, start_pos_x:start_pos_x + polygon_mask_w] = \
+        polygon_mask
 
-if __name__ == '__main__':
-    path = "D:/study/Intelligent-Placer/data/yes/test7.jpg"
-    result = check_image(path)
-    print(result)
+    for object_mask, _ in sorted_object_masks_with_areas:
+        if not try_to_fit_object(extended_polygon_mask, object_mask, start_pos_x, start_pos_y):
+            return False
+
+    return True
